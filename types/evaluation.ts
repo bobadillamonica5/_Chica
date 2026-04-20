@@ -68,10 +68,18 @@ export interface DatabaseRecord {
   timestamp: string;
 }
 
+export interface MultipleChoiceQuestion {
+  question: string;
+  options: string[];      // exactly 4
+  correct_index: number;  // 0-based
+  explanation: string;
+}
+
 export interface EvaluationResponse {
   tutor_response: string;
   metadata: TutorMetadata;
   database_ready: DatabaseRecord;
+  multiple_choice: MultipleChoiceQuestion | null;  // null when is_correct is true
 }
 
 export interface EnrichedMessage {

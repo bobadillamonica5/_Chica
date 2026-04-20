@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import ChatWindow from "@/components/ChatWindow";
 import InputBar from "@/components/InputBar";
+import KnowledgePanel from "@/components/KnowledgePanel";
 import type { EnrichedMessage } from "@/types/evaluation";
 import { createClient } from "@/lib/supabase/client";
 import type { User } from "@supabase/supabase-js";
@@ -16,10 +17,18 @@ const WELCOME: Message = {
     "Hola! I'm your Spanish tutor. Type a sentence about the past in Spanish and I'll evaluate whether you used the preterite or imperfect tense correctly.\n\nTry something like:\n• \"Ayer comí pizza.\" (Did I use the right tense?)\n• \"Cuando era niño, jugaba al fútbol todos los días.\"\n• \"Dormía cuando sonó el teléfono.\"",
 };
 
+const NAV_ITEMS = [
+  { id: "chat", label: "Chat" },
+  { id: "focus", label: "Focus Areas" },
+] as const;
+
+type View = "chat" | "focus";
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([WELCOME]);
   const [isLoading, setIsLoading] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  const [view, setView] = useState<View>("chat");
   const sessionId = useRef<string>(crypto.randomUUID());
   const attemptCounter = useRef<number>(0);
 
@@ -28,11 +37,28 @@ export default function Home() {
     supabase.auth.getUser().then(({ data: { user } }) => setUser(user));
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) =>
-      setUser(session?.user ?? null)
-    );
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      const u = session?.user ?? null;
+      setUser(u);
+      if (u) loadHistory();
+    });
     return () => subscription.unsubscribe();
   }, []);
+
+  async function loadHistory() {
+    const res = await fetch("/api/messages");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.messages?.length) return;
+    const loaded: Message[] = data.messages.map(
+      (m: { role: "user" | "assistant"; content: string }) => ({
+        id: crypto.randomUUID(),
+        role: m.role,
+        content: m.content,
+      })
+    );
+    setMessages(loaded);
+  }
 
   async function handleLogout() {
     const supabase = createClient();
@@ -120,12 +146,37 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="flex-1 overflow-hidden flex flex-col max-w-3xl w-full mx-auto">
-        <ChatWindow messages={messages} isLoading={isLoading} />
-      </div>
+      <div className="flex flex-1 overflow-hidden">
+        {/* Left sidebar */}
+        <nav className="w-44 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col pt-4 gap-1 px-2">
+          {NAV_ITEMS.map(({ id, label }) => (
+            <button
+              key={id}
+              onClick={() => setView(id)}
+              className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                view === id
+                  ? "bg-indigo-50 text-indigo-700"
+                  : "text-gray-500 hover:bg-gray-100 hover:text-gray-800"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
 
-      <div className="max-w-3xl w-full mx-auto w-full">
-        <InputBar onSubmit={handleSubmit} disabled={isLoading} />
+        {/* Main content */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {view === "chat" ? (
+            <>
+              <ChatWindow messages={messages} isLoading={isLoading} />
+              <InputBar onSubmit={handleSubmit} disabled={isLoading} />
+            </>
+          ) : (
+            <div className="flex-1 overflow-y-auto">
+              <KnowledgePanel user={user} />
+            </div>
+          )}
+        </div>
       </div>
     </main>
   );

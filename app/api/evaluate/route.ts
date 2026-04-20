@@ -32,7 +32,7 @@ Keep your tone encouraging and educational. Aim for 3–5 sentences total.
 ## Response format — CRITICAL
 
 Respond with ONLY a single valid JSON object. No markdown code fences, no prose before or after the JSON.
-Required top-level keys: tutor_response, metadata, database_ready.
+Required top-level keys: tutor_response, metadata, database_ready, multiple_choice.
 
 tutor_response: (string) Your 3–5 sentence feedback following all rules above. Start with "✓ Correct!" for correct sentences or "✗ Not quite." for incorrect ones. For correct sentences: state the tense used, explain why it is right in 2–3 sentences, give a similar example. For incorrect sentences: identify the verb(s), explain the error, state the correct tense and why, provide the corrected sentence.
 
@@ -61,7 +61,14 @@ database_ready:
   tense_used: same as metadata.tense_used
   tense_intended: same as metadata.tense_intended
   confidence_score: same as metadata.confidence_score
-  timestamp: ""`;
+  timestamp: ""
+
+multiple_choice: when is_correct is FALSE, generate a multiple choice question that tests the same grammar concept the student struggled with. Structure:
+  question: (string) a clear question in English asking which sentence correctly uses the relevant tense/concept
+  options: array of exactly 4 Spanish sentences — one correct, three plausible but wrong
+  correct_index: 0-based integer index of the correct option in the options array
+  explanation: (string) 1-2 sentences explaining why the correct answer is right, referencing the specific rule
+When is_correct is TRUE, set multiple_choice to null.`;
 
 export async function POST(request: Request) {
   const body = await request.json().catch(() => null);
@@ -85,31 +92,53 @@ export async function POST(request: Request) {
 
   const studentId = user ? user.id : `anon:${sessionId}`;
 
-  // For authenticated users, fetch history and build a mastery context prefix
+  // For authenticated users: fetch mastery context + recent message history
   let masteryContext = "";
+  let recentContext = "";
+
   if (user) {
     const serviceClient = createServiceClient();
-    const { data: history } = await serviceClient
-      .from("evaluations")
-      .select("concept_practiced, was_correct, difficulty_level")
-      .eq("student_id", user.id)
-      .order("timestamp", { ascending: false })
-      .limit(50);
+
+    const [{ data: history }, { data: recentMessages }] = await Promise.all([
+      serviceClient
+        .from("evaluations")
+        .select("concept_practiced, was_correct, difficulty_level")
+        .eq("student_id", user.id)
+        .order("timestamp", { ascending: false })
+        .limit(50),
+      serviceClient
+        .from("messages")
+        .select("role, content")
+        .eq("student_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(6),
+    ]);
 
     if (history && history.length > 0) {
       masteryContext = masteryToPromptContext(computeMastery(history));
     }
+
+    if (recentMessages && recentMessages.length > 0) {
+      // Reverse so oldest is first, then format as a readable exchange summary
+      const ordered = [...recentMessages].reverse();
+      const lines = ordered.map(
+        (m) => `${m.role === "user" ? "Student" : "Tutor"}: ${m.content}`
+      );
+      recentContext = `## Recent session\n${lines.join("\n")}`;
+    }
   }
 
-  const systemPrompt = masteryContext
-    ? `${masteryContext}\n\n${BASE_SYSTEM_PROMPT}`
-    : BASE_SYSTEM_PROMPT;
+  const contextParts = [masteryContext, recentContext].filter(Boolean);
+  const systemPrompt =
+    contextParts.length > 0
+      ? `${contextParts.join("\n\n")}\n\n${BASE_SYSTEM_PROMPT}`
+      : BASE_SYSTEM_PROMPT;
 
   const userContent = `SESSION_ID: ${sessionId}\nATTEMPT_NUMBER: ${attemptNumber}\nSENTENCE: ${sentence}`;
 
   const message = await anthropic.messages.create({
     model: "claude-sonnet-4-6",
-    max_tokens: 1024,
+    max_tokens: 2048,
     system: systemPrompt,
     messages: [{ role: "user", content: userContent }],
   });
@@ -137,19 +166,34 @@ export async function POST(request: Request) {
   parsed.database_ready.tense_intended = parsed.metadata.tense_intended;
   parsed.database_ready.confidence_score = parsed.metadata.confidence_score;
 
-  // Fire-and-forget DB write — does not block the response
+  // Fire-and-forget: save evaluation + both chat messages
   const serviceClient = createServiceClient();
+
   serviceClient
     .from("evaluations")
     .insert(parsed.database_ready)
     .then(({ error }) => {
-      if (error) {
-        console.error("[DB write failed]", error.message, {
-          student_id: studentId,
-          session_id: sessionId,
-          attempt_number: attemptNumber,
-        });
-      }
+      if (error) console.error("[evaluations write failed]", error.message);
+    });
+
+  serviceClient
+    .from("messages")
+    .insert([
+      {
+        student_id: studentId,
+        session_id: sessionId,
+        role: "user",
+        content: sentence,
+      },
+      {
+        student_id: studentId,
+        session_id: sessionId,
+        role: "assistant",
+        content: parsed.tutor_response,
+      },
+    ])
+    .then(({ error }) => {
+      if (error) console.error("[messages write failed]", error.message);
     });
 
   return Response.json({ evaluation: parsed });
